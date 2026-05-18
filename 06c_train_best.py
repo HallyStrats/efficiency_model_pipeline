@@ -27,6 +27,8 @@ import os
 import pickle
 from datetime import datetime
 
+os.environ["PYTORCH_MPS_DISABLE"] = "1"  # must be set before torch import
+
 import joblib
 import numpy as np
 import optuna
@@ -44,6 +46,8 @@ from importlib import import_module
 cfg = import_module("00_config")
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+SEEDS = [42, 123, 456]
 
 # ---------------------------------------------------------------------------
 # Road type encoding
@@ -127,17 +131,28 @@ class TripDataset(Dataset):
 def collate_trips(batch):
     seqs, targets = zip(*batch)
     lengths = torch.tensor([len(s) for s in seqs])
-    return pad_sequence(seqs, batch_first=True), pad_sequence(targets, batch_first=True), lengths
+    max_len = int(lengths.max())
+    feat_dim = seqs[0].shape[1]
+    # Manual numpy padding avoids torch.pad_sequence -> fill_out deadlock on macOS CPU
+    seqs_arr = np.zeros((len(seqs), max_len, feat_dim), dtype=np.float32)
+    tgt_arr  = np.zeros((len(seqs), max_len),           dtype=np.float32)
+    for i, (s, t) in enumerate(zip(seqs, targets)):
+        seqs_arr[i, :len(s)] = s.numpy()
+        tgt_arr[i,  :len(t)] = t.numpy()
+    return torch.from_numpy(seqs_arr), torch.from_numpy(tgt_arr), lengths
 
 
 # ---------------------------------------------------------------------------
 # Training functions
 # ---------------------------------------------------------------------------
 
-def train_lstm(train_df, val_df, feature_cols, target_col, model_path, scaler_path):
+def train_lstm(train_df, val_df, feature_cols, target_col, model_path, scaler_path, seed=42):
     """Train 2-layer LSTM on per-timestep Wh/km."""
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
     print("\n" + "=" * 70)
-    print("Training LSTM (GPS-only, Wh/km target)")
+    print(f"Training LSTM (GPS-only, Wh/km target, seed={seed})")
     print("=" * 70)
 
     device = torch.device("cpu")  # MPS can hang; CPU is reliable
@@ -326,20 +341,29 @@ def main():
     train[target] = train["energy_whkm"].clip(upper=clip_val)
     val[target] = val["energy_whkm"].clip(upper=clip_val)
 
-    # --- Train LSTM ---
-    lstm_model = train_lstm(
-        train, val, feature_cols, target,
-        os.path.join(out_dir, "lstm_model.pt"),
-        os.path.join(out_dir, "lstm_scaler.joblib"),
-    )
+    # --- Train LSTM (3 seeds for robustness reporting) ---
+    scaler_path = os.path.join(out_dir, "lstm_scaler.joblib")
+    for seed in SEEDS:
+        model_path = os.path.join(out_dir, f"lstm_model_seed{seed}.pt")
+        if os.path.exists(model_path):
+            print(f"\n[Seed {seed}] Already trained — skipping ({model_path})")
+            continue
+        print(f"\n[Seed {seed}  ({SEEDS.index(seed)+1}/{len(SEEDS)})]")
+        train_lstm(train, val, feature_cols, target, model_path, scaler_path, seed=seed)
 
     # --- Tune + train XGBoost ---
-    xgb_model, xgb_params = tune_and_train_xgb(
-        train, val, feature_cols, target,
-        os.path.join(out_dir, "xgb_model.json"),
-        os.path.join(out_dir, "xgb_params.json"),
-        n_trials=50,
-    )
+    xgb_path    = os.path.join(out_dir, "xgb_model.json")
+    params_path = os.path.join(out_dir, "xgb_params.json")
+    if os.path.exists(xgb_path) and os.path.exists(params_path):
+        print("\nXGBoost model already exists — skipping (load deferred to evaluation)")
+        with open(params_path) as f:
+            xgb_params = json.load(f)
+    else:
+        xgb_model, xgb_params = tune_and_train_xgb(
+            train, val, feature_cols, target,
+            xgb_path, params_path,
+            n_trials=50,
+        )
 
     # --- Save metadata ---
     meta = {
@@ -355,6 +379,8 @@ def main():
             "batch_size": 128,
             "max_epochs": 100,
             "patience": 15,
+            "seeds": SEEDS,
+            "models": [f"lstm_model_seed{s}.pt" for s in SEEDS],
         },
         "xgb": {
             "tuning": f"{50} Optuna trials",

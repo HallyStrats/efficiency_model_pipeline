@@ -112,12 +112,18 @@ def compute_features_for_rider(rdf: pd.DataFrame) -> pd.DataFrame:
     df["lat_smooth"] = lat_arr
     df["lon_smooth"] = lon_arr
 
-    # --- Step distance (haversine from smoothed coords) ---
-    df["distance_m"] = haversine_series(df["lat_smooth"], df["lon_smooth"])
-    # NaN at session boundaries
+    # --- Step distance ---
+    # Primary: GPS-reported speed (Doppler) integrated over the timestep.
+    # This avoids inflating distance from GPS-position jitter at low speeds and
+    # matches the convention used in our prior fleet-energy work.
+    # Fallback: haversine from smoothed coords where GPS speed is missing.
+    haversine_dist = haversine_series(df["lat_smooth"], df["lon_smooth"])
+    spd_ms = df["spd"] / 3.6                         # km/h → m/s
+    spd_dist = spd_ms * df["dt_seconds"]
+    df["distance_m"] = spd_dist.where(df["spd"].notna(), haversine_dist)
     df.loc[session_break, "distance_m"] = np.nan
 
-    # --- Speed from coordinates ---
+    # --- Speed (consistent with distance) ---
     df["speed_ms"] = df["distance_m"] / df["dt_seconds"]
     df.loc[df["speed_ms"] > cfg.SPEED_CAP_MS, "speed_ms"] = np.nan
 
@@ -302,17 +308,23 @@ def main():
     df = df[(df["elevation_m"].isna()) | (df["elevation_m"] >= cfg.ELEVATION_MIN_M)]
     print(f"  Elevation < {cfg.ELEVATION_MIN_M}m:              {before - len(df):>8,}  → {len(df):,}")
 
-    # Drop invalid energy values
+    # Drop sensor-spike rows (huge |rc| jumps or implausible discharge power),
+    # but KEEP regen / coasting rows so their distance still contributes to the
+    # trip denominator. Negative energy_wh is clipped to 0 below — net energy
+    # per net distance is the physically meaningful quantity for range/grid use.
     before = len(df)
-    # Only keep positive discharge
-    valid_energy = (df["energy_wh"] > 0) & (df["energy_wh"].notna())
-    # Cap based on power: energy_wh / (dt/3600) < DISCHARGE_MAX_W
-    power_w = df["energy_wh"] / (df["dt_seconds"] / 3600.0)
-    valid_energy = valid_energy & (power_w <= cfg.DISCHARGE_MAX_W)
-    # Cap single-step rc change
-    valid_energy = valid_energy & ((-rc_delta.reindex(df.index)).abs() <= cfg.RC_STEP_MAX_MAH)
+    valid_energy = df["energy_wh"].notna()
+    abs_rc_delta = (-rc_delta.reindex(df.index)).abs()
+    valid_energy = valid_energy & (abs_rc_delta <= cfg.RC_STEP_MAX_MAH)
+    abs_power_w = (df["energy_wh"] / (df["dt_seconds"] / 3600.0)).abs()
+    valid_energy = valid_energy & (abs_power_w <= cfg.DISCHARGE_MAX_W)
     df = df[valid_energy].reset_index(drop=True)
-    print(f"  Invalid energy:                  {before - len(df):>8,}  → {len(df):,}")
+    print(f"  Sensor-spike rows:               {before - len(df):>8,}  → {len(df):,}")
+
+    # Clip regen / negative energy to zero (keep the row's distance + features)
+    n_regen = int((df["energy_wh"] < 0).sum())
+    df["energy_wh"] = df["energy_wh"].clip(lower=0)
+    print(f"  Negative energy clipped to 0:    {n_regen:>8,}  rows kept in trip")
 
     # Drop rows with null speed (needed for both models)
     before = len(df)

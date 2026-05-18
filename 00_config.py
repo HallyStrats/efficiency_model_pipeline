@@ -15,7 +15,7 @@ PROJECT_DIR = os.path.join(SRC_DIR, "..")
 RAW_DIR     = os.path.join(PROJECT_DIR, "all_data")
 DATA_DIR    = os.path.join(SRC_DIR, "data")
 MODEL_DIR   = os.path.join(SRC_DIR, "models")
-RESULTS_DIR = os.path.join(SRC_DIR, "results")
+RESULTS_DIR = os.path.join(SRC_DIR, "results_new")
 
 # ---------------------------------------------------------------------------
 # Random seed
@@ -67,7 +67,7 @@ ELEVATION_MIN_M     = 1_000        # Nairobi basin floor
 DISCHARGE_MAX_W     = 6_000        # max plausible discharge power (watts)
 REGEN_MAX_W         = 3_000        # max plausible regen power (watts)
 RC_STEP_MAX_MAH     = 500          # max plausible rc change per step
-N_SERIES_CELLS      = 19           # cells in series for pack voltage
+N_SERIES_CELLS      = 20           # cells in series for pack voltage
 NOMINAL_CELL_MV     = 3_600        # nominal cell voltage (mV)
 
 # ---------------------------------------------------------------------------

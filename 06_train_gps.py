@@ -17,6 +17,8 @@ Output:
 import os
 import json
 
+os.environ["PYTORCH_MPS_DISABLE"] = "1"  # must be set before torch import
+
 import numpy as np
 import pandas as pd
 import joblib
@@ -81,9 +83,15 @@ class TripDataset(Dataset):
 def collate_trips(batch):
     seqs, targets = zip(*batch)
     lengths = torch.tensor([len(s) for s in seqs])
-    seqs_padded = pad_sequence(seqs, batch_first=True)
-    targets_padded = pad_sequence(targets, batch_first=True)
-    return seqs_padded, targets_padded, lengths
+    max_len = int(lengths.max())
+    feat_dim = seqs[0].shape[1]
+    # Manual numpy padding avoids torch.pad_sequence -> fill_out deadlock on macOS CPU
+    seqs_arr = np.zeros((len(seqs), max_len, feat_dim), dtype=np.float32)
+    tgt_arr  = np.zeros((len(seqs), max_len),           dtype=np.float32)
+    for i, (s, t) in enumerate(zip(seqs, targets)):
+        seqs_arr[i, :len(s)] = s.numpy()
+        tgt_arr[i,  :len(t)] = t.numpy()
+    return torch.from_numpy(seqs_arr), torch.from_numpy(tgt_arr), lengths
 
 
 # ---------------------------------------------------------------------------
@@ -200,8 +208,7 @@ def train_lstm(train_df, val_df, feature_cols, model_path, scaler_path):
     print("Model C: GPS Per-timestep LSTM")
     print("="*70)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else
-                          "mps" if torch.backends.mps.is_available() else "cpu")
+    device = torch.device("cpu")  # MPS hangs on pack_padded_sequence
     print(f"  Device: {device}")
 
     # Scale features
